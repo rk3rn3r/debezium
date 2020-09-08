@@ -25,6 +25,13 @@
             <artifactId>connect-api</artifactId>
             <scope>provided</scope>
         </dependency>
+
+        <dependency>
+            <groupId>org.apache.kafka</groupId>
+            <artifactId>connect-runtime</artifactId>
+            <scope>provided</scope>
+        </dependency>
+
         <dependency>
             <groupId>org.apache.kafka</groupId>
             <artifactId>connect-transforms</artifactId>
@@ -130,6 +137,7 @@
                 <directory>src/main/resources</directory>
                 <includes>
                     <include>**/build.properties</include>
+                    <include>**/META-INF/services/*</include>
                 </includes>
             </resource>
         </resources>
