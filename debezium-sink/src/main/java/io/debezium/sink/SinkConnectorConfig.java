@@ -5,6 +5,8 @@
  */
 package io.debezium.sink;
 
+import java.util.Set;
+
 import org.apache.kafka.common.config.ConfigDef;
 
 import io.debezium.config.EnumeratedValue;
@@ -145,12 +147,12 @@ public interface SinkConnectorConfig {
 
     String PRIMARY_KEY_MODE = "primary.key.mode";
     Field PRIMARY_KEY_MODE_FIELD = Field.create(PRIMARY_KEY_MODE)
-            .withDisplayName("The primary key mode")
+            .withDisplayName("Primary key mode")
             .withEnum(PrimaryKeyMode.class, PrimaryKeyMode.NONE)
             .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR, 4))
             .withWidth(ConfigDef.Width.SHORT)
             .withImportance(ConfigDef.Importance.HIGH)
-            .withDescription("The primary key mode");
+            .withDescription("The primary key mode.");
 
     String DEFAULT_TIME_ZONE = "UTC";
     String USE_TIME_ZONE = "use.time.zone";
@@ -176,9 +178,21 @@ public interface SinkConnectorConfig {
             .withDescription("Specifies how many records to attempt to batch together into the destination table, when possible. " +
                     "You can also configure the connector’s underlying consumer’s max.poll.records using consumer.override.max.poll.records in the connector configuration.");
 
+    String PRIMARY_KEY_FIELDS = "primary.key.fields";
+    Field PRIMARY_KEY_FIELDS_FIELD = Field.create(PRIMARY_KEY_FIELDS)
+            .withDisplayName("Comma-separated list of primary key field names")
+            .withType(ConfigDef.Type.STRING)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR, 5))
+            .withWidth(ConfigDef.Width.MEDIUM)
+            .withImportance(ConfigDef.Importance.LOW)
+            .withDescription("A comma-separated list of primary key field names. " +
+                    "This is interpreted differently depending on " + PRIMARY_KEY_MODE + ".");
+
     String getCollectionNameFormat();
 
     PrimaryKeyMode getPrimaryKeyMode();
+
+    Set<String> getPrimaryKeyFields();
 
     boolean isTruncateEnabled();
 

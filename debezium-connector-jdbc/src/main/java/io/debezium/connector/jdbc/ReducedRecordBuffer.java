@@ -30,7 +30,7 @@ public class ReducedRecordBuffer implements Buffer {
     private Schema keySchema;
     private Schema valueSchema;
 
-    private final Map<Struct, JdbcSinkRecord> records = new HashMap<>();
+    private final Map<Object, JdbcSinkRecord> records = new HashMap<>();
     private final TableDescriptor tableDescriptor;
 
     @VisibleForTesting
@@ -61,7 +61,7 @@ public class ReducedRecordBuffer implements Buffer {
             isSchemaChanged = true;
         }
 
-        Struct keyStruct = record.getKeyStruct(connectorConfig.getPrimaryKeyMode(), connectorConfig.getPrimaryKeyFields());
+        Struct keyStruct = record.getFilteredKey(connectorConfig.getPrimaryKeyMode(), connectorConfig.getPrimaryKeyFields(), connectorConfig.getFieldFilter());
         if (keyStruct != null) {
             records.put(keyStruct, record);
         }

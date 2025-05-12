@@ -5,6 +5,8 @@
  */
 package io.debezium.connector.jdbc;
 
+import io.debezium.sink.value_bind.ValueBindDescriptor;
+
 public interface QueryBinder {
 
     void bind(ValueBindDescriptor valueBindDescriptor);

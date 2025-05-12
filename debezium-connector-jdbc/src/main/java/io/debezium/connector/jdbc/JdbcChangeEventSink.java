@@ -6,7 +6,6 @@
 package io.debezium.connector.jdbc;
 
 import static io.debezium.connector.jdbc.JdbcSinkConnectorConfig.SchemaEvolutionMode.NONE;
-import static io.debezium.connector.jdbc.JdbcSinkRecord.FieldDescriptor;
 
 import java.sql.SQLException;
 import java.time.Duration;
@@ -15,7 +14,6 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 
 import org.apache.kafka.connect.errors.ConnectException;
@@ -31,7 +29,8 @@ import org.slf4j.LoggerFactory;
 import io.debezium.connector.jdbc.dialect.DatabaseDialect;
 import io.debezium.connector.jdbc.relational.TableDescriptor;
 import io.debezium.metadata.CollectionId;
-import io.debezium.sink.DebeziumSinkRecord;
+import io.debezium.sink.AbstractChangeEventSink;
+import io.debezium.sink.field.FieldDescriptor;
 import io.debezium.sink.spi.ChangeEventSink;
 import io.debezium.util.Clock;
 import io.debezium.util.Metronome;
@@ -42,11 +41,9 @@ import io.debezium.util.Stopwatch;
  *
  * @author Chris Cranford
  */
-public class JdbcChangeEventSink implements ChangeEventSink {
+public class JdbcChangeEventSink extends AbstractChangeEventSink implements ChangeEventSink {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(JdbcChangeEventSink.class);
-
-    public static final String DETECT_SCHEMA_CHANGE_RECORD_MSG = "Schema change records are not supported by JDBC connector. Adjust `topics` or `topics.regex` to exclude schema change topic.";
 
     private final JdbcSinkConnectorConfig config;
     private final DatabaseDialect dialect;
@@ -57,6 +54,7 @@ public class JdbcChangeEventSink implements ChangeEventSink {
     private final Duration flushRetryDelay;
 
     public JdbcChangeEventSink(JdbcSinkConnectorConfig config, StatelessSession session, DatabaseDialect dialect, RecordWriter recordWriter) {
+        super(config);
         this.config = config;
         this.dialect = dialect;
         this.session = session;
@@ -69,25 +67,22 @@ public class JdbcChangeEventSink implements ChangeEventSink {
     }
 
     public void execute(Collection<SinkRecord> records) {
+        if (config.isSharedChangeEventSinkEnabled()) {
+            put(records);
+            return;
+        }
         final Map<CollectionId, Buffer> upsertBufferByTable = new LinkedHashMap<>();
         final Map<CollectionId, Buffer> deleteBufferByTable = new LinkedHashMap<>();
 
         for (SinkRecord kafkaSinkRecord : records) {
-
             JdbcSinkRecord record = new JdbcKafkaSinkRecord(kafkaSinkRecord, config.getPrimaryKeyMode(), config.getPrimaryKeyFields(), config.getFieldFilter(), dialect);
-            LOGGER.trace("Processing {}", record);
 
-            validate(record);
-
-            Optional<CollectionId> optionalCollectionId = getCollectionIdFromRecord(record);
-            if (optionalCollectionId.isEmpty()) {
-
+            CollectionId collectionId = getCollectionIdFromRecord(record);
+            if (null == collectionId) {
                 LOGGER.warn("Ignored to write record from topic '{}' partition '{}' offset '{}'. No resolvable table name", record.topicName(), record.partition(),
                         record.offset());
                 continue;
             }
-
-            final CollectionId collectionId = optionalCollectionId.get();
 
             if (record.isTruncate()) {
                 if (!config.isTruncateEnabled()) {
@@ -140,54 +135,7 @@ public class JdbcChangeEventSink implements ChangeEventSink {
         flushBuffers(deleteBufferByTable);
     }
 
-    private void validate(JdbcSinkRecord record) {
-        if (record.isSchemaChange()) {
-            LOGGER.error(DETECT_SCHEMA_CHANGE_RECORD_MSG);
-            throw new DataException(DETECT_SCHEMA_CHANGE_RECORD_MSG);
-        }
-    }
-
-    private BufferFlushRecords getRecordsToFlush(Map<CollectionId, Buffer> bufferMap, CollectionId collectionId, JdbcSinkRecord record) {
-        Stopwatch stopwatch = Stopwatch.reusable();
-        stopwatch.start();
-
-        Buffer buffer = getOrCreateBuffer(bufferMap, collectionId, record);
-
-        if (isSchemaChanged(record, buffer.getTableDescriptor())) {
-            flushBufferWithRetries(collectionId, buffer);
-
-            // Explicitly remove as we need to recreate the buffer
-            bufferMap.remove(collectionId);
-
-            buffer = getOrCreateBuffer(bufferMap, collectionId, record);
-        }
-
-        List<JdbcSinkRecord> toFlush = buffer.add(record);
-        stopwatch.stop();
-
-        LOGGER.trace("[PERF] Resolve and add record execution time for collection '{}': {}", collectionId.name(), stopwatch.durations());
-
-        return new BufferFlushRecords(buffer, toFlush);
-    }
-
-    private Buffer getOrCreateBuffer(Map<CollectionId, Buffer> bufferMap, CollectionId collectionId, JdbcSinkRecord record) {
-        return bufferMap.computeIfAbsent(collectionId, (id) -> {
-            final TableDescriptor tableDescriptor;
-            try {
-                tableDescriptor = checkAndApplyTableChangesIfNeeded(collectionId, record);
-            }
-            catch (SQLException e) {
-                throw new ConnectException("Error while checking and applying table changes for collection '" + collectionId + "'", e);
-            }
-            return createBuffer(config, tableDescriptor, record);
-        });
-    }
-
-    // Describes a specific buffer and a potential subset of records in the buffer to be flushed
-    private record BufferFlushRecords(Buffer buffer, List<JdbcSinkRecord> records) {
-    }
-
-    private Buffer createBuffer(JdbcSinkConnectorConfig config, TableDescriptor tableDescriptor, JdbcSinkRecord record) {
+    private Buffer resolveBuffer(Map<CollectionId, Buffer> bufferMap, CollectionId collectionId, JdbcSinkRecord record) {
         if (config.isUseReductionBuffer() && !record.keyFieldNames().isEmpty()) {
             return new ReducedRecordBuffer(config, tableDescriptor);
         }
@@ -422,8 +370,8 @@ public class JdbcChangeEventSink implements ChangeEventSink {
         }
     }
 
-    public Optional<CollectionId> getCollectionId(String collectionName) {
-        return Optional.of(dialect.getCollectionId(collectionName));
+    public CollectionId getCollectionId(String collectionName) {
+        return dialect.getCollectionId(collectionName);
     }
 
     private boolean isRetriable(Throwable throwable) {
@@ -436,13 +384,5 @@ public class JdbcChangeEventSink implements ChangeEventSink {
             }
         }
         return isRetriable(throwable.getCause());
-    }
-
-    public Optional<CollectionId> getCollectionIdFromRecord(DebeziumSinkRecord record) {
-        String tableName = this.config.getCollectionNamingStrategy().resolveCollectionName(record, config.getCollectionNameFormat());
-        if (tableName == null) {
-            return Optional.empty();
-        }
-        return getCollectionId(tableName);
     }
 }

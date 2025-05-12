@@ -11,6 +11,8 @@ import java.sql.SQLException;
 import java.sql.Types;
 import java.util.Collection;
 
+import io.debezium.sink.value_bind.ValueBindDescriptor;
+
 public class PreparedStatementQueryBinder implements QueryBinder {
 
     private final PreparedStatement binder;

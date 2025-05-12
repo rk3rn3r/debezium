@@ -5,7 +5,9 @@
  */
 package io.debezium.bindings.kafka;
 
-import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 import org.apache.kafka.connect.data.Field;
@@ -18,17 +20,36 @@ import org.apache.kafka.connect.sink.SinkRecord;
 
 import io.debezium.annotation.Immutable;
 import io.debezium.data.Envelope;
-import io.debezium.sink.DebeziumSinkRecord;
 import io.debezium.sink.SinkConnectorConfig;
+import io.debezium.sink.field.FieldDescriptor;
+import io.debezium.sink.filter.FieldFilterFactory;
 import io.debezium.util.Strings;
 
 @Immutable
 public class KafkaDebeziumSinkRecord implements DebeziumSinkRecord {
 
     protected final SinkRecord originalKafkaRecord;
+    private final Struct kafkaCoordinates;
+    private final Struct kafkaPayload;
+    private final Struct kafkaHeader;
+
+    protected final Map<String, FieldDescriptor> allFields = new LinkedHashMap<>();
 
     public KafkaDebeziumSinkRecord(SinkRecord record) {
+        Objects.requireNonNull(record, "The sink record must be provided.");
+
         this.originalKafkaRecord = record;
+        this.kafkaCoordinates = getKafkaCoordinates();
+        this.kafkaHeader = getRecordHeaders();
+
+        final var flattened = isFlattened();
+        // final boolean truncated = !flattened && isTruncate();
+        if (flattened || !isTruncate()) {
+            this.kafkaPayload = getKafkaPayload(flattened);
+        }
+        else {
+            this.kafkaPayload = null;
+        }
     }
 
     @Override
@@ -47,8 +68,17 @@ public class KafkaDebeziumSinkRecord implements DebeziumSinkRecord {
     }
 
     @Override
-    public List<String> keyFieldNames() {
-        throw new RuntimeException("Not implemented");
+    public Struct kafkaCoordinates() {
+        return kafkaCoordinates;
+    }
+
+    @Override
+    public Struct kafkaHeader() {
+        return kafkaHeader;
+    }
+
+    public Map<String, FieldDescriptor> allFields() {
+        return allFields;
     }
 
     @Override
@@ -72,7 +102,8 @@ public class KafkaDebeziumSinkRecord implements DebeziumSinkRecord {
 
     @Override
     public boolean isDebeziumMessage() {
-        return originalKafkaRecord.value() != null && originalKafkaRecord.valueSchema().name() != null && originalKafkaRecord.valueSchema().name().contains("Envelope");
+        return originalKafkaRecord.value() != null && originalKafkaRecord.valueSchema() != null && originalKafkaRecord.valueSchema().name() != null
+                && originalKafkaRecord.valueSchema().name().endsWith("Envelope");
     }
 
     public boolean isSchemaChange() {
@@ -82,7 +113,8 @@ public class KafkaDebeziumSinkRecord implements DebeziumSinkRecord {
     }
 
     public boolean isFlattened() {
-        return !isTombstone() && (originalKafkaRecord.valueSchema().name() == null || !originalKafkaRecord.valueSchema().name().contains("Envelope"));
+        return !isTombstone() && null != originalKafkaRecord.valueSchema()
+                && (originalKafkaRecord.valueSchema().name() == null || !originalKafkaRecord.valueSchema().name().contains("Envelope"));
     }
 
     @Override
@@ -108,78 +140,166 @@ public class KafkaDebeziumSinkRecord implements DebeziumSinkRecord {
     @Override
     public boolean isTruncate() {
         if (isDebeziumMessage()) {
-            final Struct value = (Struct) originalKafkaRecord.value();
+            Struct value = (Struct) originalKafkaRecord.value();
+            if (value.schema().name().endsWith("CloudEvents.Envelope")) {
+                value = value.getStruct("data");
+            }
             return Envelope.Operation.TRUNCATE.equals(Envelope.Operation.forCode(value.getString(Envelope.FieldName.OPERATION)));
         }
         return false;
     }
 
     public Struct getPayload() {
-        if (isDebeziumMessage()) {
-            return ((Struct) originalKafkaRecord.value()).getStruct(Envelope.FieldName.AFTER);
+        return kafkaPayload;
+    }
+
+    public Struct getFilteredPayload(FieldFilterFactory.FieldNameFilter fieldsFilter) {
+        return filterFields(getPayload(), topicName(), Set.of(), fieldsFilter);
+    }
+
+    private Struct filterFields(Struct data, String topicName, Set<String> allowedPrimaryKeyFields, FieldFilterFactory.FieldNameFilter fieldsFilter) {
+        final SchemaBuilder schemaBuilder = SchemaBuilder.struct();
+        if (!allowedPrimaryKeyFields.isEmpty()) {
+            allowedPrimaryKeyFields.forEach(fieldName -> {
+                Field field = data.schema().field(fieldName);
+                schemaBuilder.field(field.name(), field.schema());
+            });
+            final Schema schema = schemaBuilder.build();
+            Struct filteredData = new Struct(schema);
+            schema.fields().forEach(field -> filteredData.put(field.name(), data.get(field.name())));
+            return filteredData;
         }
         else {
-            return ((Struct) originalKafkaRecord.value());
+            data.schema().fields().forEach(field -> {
+                if (null != fieldsFilter) {
+                    if (fieldsFilter.matches(topicName, field.name())) {
+                        schemaBuilder.field(field.name(), field.schema());
+                    }
+                }
+                else {
+                    schemaBuilder.field(field.name(), field.schema());
+                }
+            });
+            final Schema schema = schemaBuilder.build();
+            Struct filteredData = new Struct(schema);
+            schema.fields().forEach(field -> {
+                if (null != fieldsFilter) {
+                    if (fieldsFilter.matches(topicName, field.name())) {
+                        filteredData.put(field.name(), data.get(field));
+                    }
+                }
+                else {
+                    filteredData.put(field.name(), data.get(field));
+                }
+            });
+            return filteredData;
         }
     }
 
     @Override
-    public Struct getKeyStruct(SinkConnectorConfig.PrimaryKeyMode primaryKeyMode, Set<String> primaryKeyFields) {
-        if (!keyFieldNames().isEmpty()) {
-            switch (primaryKeyMode) {
-                case RECORD_KEY -> {
-                    final Schema keySchema = originalKafkaRecord.keySchema();
-                    if (keySchema != null && Schema.Type.STRUCT.equals(keySchema.type())) {
-                        return (Struct) originalKafkaRecord.key();
-                    }
-                    else {
-                        throw new ConnectException("No struct-based primary key defined for record key.");
-                    }
+    public Struct getFilteredKey(SinkConnectorConfig.PrimaryKeyMode primaryKeyMode, Set<String> allowedPrimaryKeyFields,
+                                 FieldFilterFactory.FieldNameFilter fieldsFilter) {
+        switch (primaryKeyMode) {
+            case RECORD_KEY -> {
+                final Schema keySchema = keySchema();
+                if (keySchema == null) {
+                    throw new ConnectException("Configured primary key mode 'record_key' cannot have null schema");
                 }
-                case RECORD_VALUE -> {
-                    final Schema valueSchema = originalKafkaRecord.valueSchema();
-                    if (valueSchema != null && Schema.Type.STRUCT.equals(valueSchema.type())) {
-                        Struct afterPayload = getPayload();
-                        if (primaryKeyFields.isEmpty()) {
-                            return afterPayload;
-                        }
-                        else {
-                            return buildRecordValueKeyStruct(afterPayload, primaryKeyFields);
-                        }
-                    }
-                    else {
-                        throw new ConnectException("No struct-based primary key defined for record value.");
-                    }
+                else if (keySchema.type().isPrimitive()) {
+                    return kafkaKeyStruct();
                 }
-                case RECORD_HEADER -> {
-                    final SchemaBuilder headerSchemaBuilder = SchemaBuilder.struct();
-                    originalKafkaRecord.headers().forEach((Header header) -> headerSchemaBuilder.field(header.key(), header.schema()));
-                    final Schema headerSchema = headerSchemaBuilder.build();
-                    final Struct headerStruct = new Struct(headerSchema);
-                    originalKafkaRecord.headers().forEach((Header header) -> headerStruct.put(header.key(), header.value()));
-                    return headerStruct;
+                if (Schema.Type.STRUCT.equals(keySchema.type())) {
+                    return filterFields(kafkaKeyStruct(), topicName(), allowedPrimaryKeyFields, fieldsFilter);
                 }
+                else {
+                    throw new ConnectException("An unsupported record key schema type detected: " + keySchema.type());
+                }
+            }
+            case RECORD_VALUE -> {
+                final Schema valueSchema = originalKafkaRecord.valueSchema();
+                if (valueSchema != null && Schema.Type.STRUCT.equals(valueSchema.type())) {
+                    return filterFields(getPayload(), topicName(), allowedPrimaryKeyFields, fieldsFilter);
+                }
+                else {
+                    throw new ConnectException("No struct-based primary key defined for record value");
+                }
+            }
+            case RECORD_HEADER -> {
+                if (originalKafkaRecord.headers().isEmpty()) {
+                    throw new ConnectException("Configured primary key mode 'record_header' cannot have empty message headers");
+                }
+                return getRecordHeaders();
             }
         }
         return null;
     }
 
-    private Struct buildRecordValueKeyStruct(Struct afterPayload, Set<String> primaryKeyFields) {
-        final SchemaBuilder keySchemaBuilder = SchemaBuilder.struct();
-        primaryKeyFields.forEach(fieldName -> {
-            Field field = afterPayload.schema().field(fieldName);
-            keySchemaBuilder.field(field.name(), field.schema());
-        });
-        Struct keyStruct = new Struct(keySchemaBuilder.build());
-        primaryKeyFields.forEach(fieldName -> {
-            Field field = afterPayload.schema().field(fieldName);
-            keyStruct.put(field.name(), afterPayload.get(field));
-        });
-        return keyStruct;
-    }
-
     public SinkRecord getOriginalKafkaRecord() {
         return originalKafkaRecord;
+    }
+
+    private static final String KAFKA_COORDINATES = "__kafka_coordinates";
+    private static final String CONNECT_TOPIC = "__connect_topic";
+    private static final String CONNECT_PARTITION = "__connect_partition";
+    private static final String CONNECT_OFFSET = "__connect_offset";
+
+    public static final Schema KAFKA_COORDINATES_SCHEMA = SchemaBuilder.struct().name(KAFKA_COORDINATES)
+            .field(CONNECT_TOPIC, Schema.OPTIONAL_STRING_SCHEMA)
+            .field(CONNECT_PARTITION, Schema.OPTIONAL_INT32_SCHEMA)
+            .field(CONNECT_OFFSET, Schema.OPTIONAL_INT64_SCHEMA).build();
+
+    private Struct getKafkaCoordinates() {
+        Struct kafkaCoordinatesStruct = new Struct(KAFKA_COORDINATES_SCHEMA);
+        kafkaCoordinatesStruct
+                .put(CONNECT_TOPIC, originalKafkaRecord.topic())
+                .put(CONNECT_PARTITION, originalKafkaRecord.kafkaPartition())
+                .put(CONNECT_OFFSET, originalKafkaRecord.kafkaOffset());
+
+        allFields.put(CONNECT_TOPIC, new FieldDescriptor(Schema.STRING_SCHEMA, CONNECT_TOPIC));
+        allFields.put(CONNECT_PARTITION, new FieldDescriptor(Schema.INT32_SCHEMA, CONNECT_PARTITION));
+        allFields.put(CONNECT_OFFSET, new FieldDescriptor(Schema.INT64_SCHEMA, CONNECT_OFFSET));
+
+        return kafkaCoordinatesStruct;
+    }
+
+    private Struct kafkaKeyStruct() {
+        if (keySchema() != null) {
+            return (Struct) originalKafkaRecord.key();
+        }
+        return null;
+    }
+
+    private static final String KAFKA_HEADERS_SUFFIX = "$__kafka_headers";
+
+    private Struct getRecordHeaders() {
+        final SchemaBuilder headerSchemaBuilder = SchemaBuilder.struct().name(originalKafkaRecord.topic() + KAFKA_HEADERS_SUFFIX);
+        originalKafkaRecord.headers().forEach((Header header) -> headerSchemaBuilder.field(header.key(), header.schema()));
+        final Schema headerSchema = headerSchemaBuilder.build();
+
+        final Struct headerStruct = new Struct(headerSchema);
+        originalKafkaRecord.headers().forEach((Header header) -> headerStruct.put(header.key(), header.value()));
+
+        return headerStruct;
+    }
+
+    private Struct getKafkaPayload(boolean flattened) {
+        final Schema valueSchema = valueSchema();
+        if (valueSchema == null) {
+            return null;
+        }
+        if (flattened) {
+            return (Struct) value();
+        }
+        else {
+            if (valueSchema.name().endsWith("CloudEvents.Envelope")) {
+                return ((Struct) value()).getStruct("data").getStruct(Envelope.FieldName.AFTER);
+            }
+            return ((Struct) value()).getStruct(Envelope.FieldName.AFTER);
+        }
+
+        // if (!configuredPrimaryKeyFields.isEmpty()) {
+        // recordFields = recordFields.filter(field -> configuredPrimaryKeyFields.contains(field.name()));
+        // }
     }
 
 }

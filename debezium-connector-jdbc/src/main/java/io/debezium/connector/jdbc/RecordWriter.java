@@ -10,7 +10,9 @@ import java.sql.PreparedStatement;
 import java.sql.Statement;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 
+import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.Struct;
 import org.hibernate.SharedSessionContract;
 import org.hibernate.Transaction;
@@ -19,6 +21,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.debezium.connector.jdbc.dialect.DatabaseDialect;
+import io.debezium.connector.jdbc.field.JdbcFieldDescriptor;
+import io.debezium.sink.value_bind.ValueBindDescriptor;
 import io.debezium.util.Stopwatch;
 
 /**
@@ -124,7 +128,7 @@ public class RecordWriter {
             query.bind(new ValueBindDescriptor(index++, record.offset()));
         }
         else {
-            final Struct keySource = record.getKeyStruct(config.getPrimaryKeyMode(), config.getPrimaryKeyFields());
+            final Struct keySource = record.getFilteredKey(config.getPrimaryKeyMode(), config.getPrimaryKeyFields(), config.getFieldFilter());
             if (keySource != null) {
                 index = bindFieldValuesToQuery(record, query, index, keySource, record.keyFieldNames());
             }
@@ -133,24 +137,30 @@ public class RecordWriter {
     }
 
     private int bindNonKeyValuesToQuery(JdbcSinkRecord record, QueryBinder query, int index) {
-        return bindFieldValuesToQuery(record, query, index, record.getPayload(), record.getNonKeyFieldNames());
+        return bindFieldValuesToQuery(record, query, index, record.getPayload(), record.nonKeyFieldNames());
     }
 
-    private int bindFieldValuesToQuery(JdbcSinkRecord record, QueryBinder query, int index, Struct source, List<String> fields) {
-        for (String fieldName : fields) {
-            final JdbcSinkRecord.FieldDescriptor field = record.allFields().get(fieldName);
-
-            Object value;
-            if (field.getSchema().isOptional()) {
-                value = source.getWithoutDefault(fieldName);
-            }
-            else {
-                value = source.get(fieldName);
-            }
-            List<ValueBindDescriptor> boundValues = dialect.bindValue(field, index, value);
-
-            boundValues.forEach(query::bind);
+    private int bindFieldValuesToQuery(JdbcSinkRecord record, QueryBinder query, int index, Struct source, Set<String> fields) {
+        if (source.schema().type().isPrimitive()) {
+            List<ValueBindDescriptor> boundValues = dialect.bindValue(record.jdbcFields().get(fields.iterator().next()), index, source);
             index += boundValues.size();
+        }
+        else if (Schema.Type.STRUCT == source.schema().type()) {
+            for (String fieldName : fields) {
+                final JdbcFieldDescriptor field = record.jdbcFields().get(fieldName);
+
+                Object value;
+                if (field.getSchema().isOptional()) {
+                    value = source.getWithoutDefault(fieldName);
+                }
+                else {
+                    value = source.get(fieldName);
+                }
+                List<ValueBindDescriptor> boundValues = dialect.bindValue(field, index, value);
+
+                boundValues.forEach(query::bind);
+                index += boundValues.size();
+            }
         }
         return index;
     }

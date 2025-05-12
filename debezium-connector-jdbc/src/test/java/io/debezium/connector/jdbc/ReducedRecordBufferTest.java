@@ -9,8 +9,6 @@ package io.debezium.connector.jdbc;
 import static java.util.function.Predicate.not;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyBoolean;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -18,7 +16,6 @@ import java.time.Instant;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -55,7 +52,7 @@ class ReducedRecordBufferTest extends AbstractRecordBufferTest {
     void setUp() {
         dialect = mock(DatabaseDialect.class);
         Type type = mock(Type.class);
-        when(type.getTypeName(eq(dialect), any(), anyBoolean())).thenReturn("");
+        when(type.getTypeName(any())).thenReturn("");
         when(dialect.getSchemaType(any())).thenReturn(type);
     }
 
@@ -233,32 +230,26 @@ class ReducedRecordBufferTest extends AbstractRecordBufferTest {
                             config.getPrimaryKeyFields(),
                             config.getFieldFilter(),
                             dialect);
-                })
-                .collect(Collectors.toList());
+                }).collect(Collectors.toList());
 
         List<List<JdbcSinkRecord>> batches = sinkRecords.stream().map(reducedRecordBuffer::add)
                 .filter(not(List::isEmpty))
                 .toList();
 
         assertThat(batches.size()).isEqualTo(1);
-        assertThat(batches.get(0).size()).isEqualTo(5);
+        var flushedBuffer = reducedRecordBuffer.flush();
+        assertThat(flushedBuffer.size()).isEqualTo(1);
 
-        batches.get(0).forEach(record -> {
-            Struct keyStruct = record.getKeyStruct(PrimaryKeyMode.RECORD_VALUE, Set.of("value_id"));
-            assertThat(keyStruct).isNotNull();
-            assertThat(keyStruct.schema().fields()).hasSize(1);
-            assertThat(keyStruct.schema().field("value_id")).isNotNull();
+        JdbcSinkRecord flushedRecord = flushedBuffer.get(0);
+        Struct keyStruct = flushedRecord.getFilteredKey(config.getPrimaryKeyMode(), config.getPrimaryKeyFields(), config.getFieldFilter());
 
-            // Verify the value_id matches what we expect (even numbers 0,2,4,6,8)
-            byte expectedValue = record.getPayload().getInt8("value_id");
-            assertThat(keyStruct.get("value_id")).isEqualTo(expectedValue);
+        assertThat(keyStruct).isNotNull();
+        assertThat(keyStruct.schema().fields()).hasSize(1);
+        assertThat(keyStruct.schema().field("value_id")).isNotNull();
 
-            // Verify the name matches what we expect (odd numbers in the last 1, 3, 5, 7)
-            // 9 is not included because the buffer is flushed after 5 records, it will be in the next batch
-            if (expectedValue < 8) {
-                String expectedName = "John Doe " + (expectedValue + 1);
-                assertThat(record.getPayload().getString("name")).isEqualTo(expectedName);
-            }
-        });
+        byte expectedValue = flushedRecord.getPayload().getInt8("value_id");
+        assertThat(keyStruct.get("value_id")).isEqualTo(expectedValue);
+        assertThat(keyStruct.get("value_id")).isEqualTo((byte) 8);
+        assertThat(flushedRecord.getPayload().get("name")).isEqualTo("John Doe " + (expectedValue + 1));
     }
 }

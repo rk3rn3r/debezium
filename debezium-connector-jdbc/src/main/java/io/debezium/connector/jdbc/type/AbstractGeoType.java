@@ -12,7 +12,7 @@ import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.errors.ConnectException;
 
-import io.debezium.connector.jdbc.ValueBindDescriptor;
+import io.debezium.sink.value_bind.ValueBindDescriptor;
 
 public abstract class AbstractGeoType extends AbstractType {
     public static final String SRID = "srid";

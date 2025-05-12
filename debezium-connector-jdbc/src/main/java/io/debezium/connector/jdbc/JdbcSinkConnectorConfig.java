@@ -53,7 +53,6 @@ public class JdbcSinkConnectorConfig implements SinkConnectorConfig {
     public static final String CONNECTION_POOL_TIMEOUT = "connection.pool.timeout";
     public static final String INSERT_MODE = "insert.mode";
     public static final String TRUNCATE_ENABLED = "truncate.enabled";
-    public static final String PRIMARY_KEY_FIELDS = "primary.key.fields";
     public static final String SCHEMA_EVOLUTION = "schema.evolution";
     public static final String QUOTE_IDENTIFIERS = "quote.identifiers";
     public static final String COLUMN_NAMING_STRATEGY = "column.naming.strategy";
@@ -61,6 +60,7 @@ public class JdbcSinkConnectorConfig implements SinkConnectorConfig {
     public static final String POSTGRES_POSTGIS_SCHEMA = "dialect.postgres.postgis.schema";
     public static final String SQLSERVER_IDENTITY_INSERT = "dialect.sqlserver.identity.insert";
     public static final String USE_REDUCTION_BUFFER = "use.reduction.buffer";
+    public static final String ENABLE_SHARED_CHANGE_EVENT_SINK = "enable.sces";
     public static final String FLUSH_MAX_RETRIES = "flush.max.retries";
     public static final String FLUSH_RETRY_DELAY_MS = "flush.retry.delay.ms";
     public static final String CONNECTION_RESTART_ON_ERRORS = "connection.restart.on.errors";
@@ -152,15 +152,6 @@ public class JdbcSinkConnectorConfig implements SinkConnectorConfig {
 
     public static final Field DELETE_ENABLED_FIELD = SinkConnectorConfig.DELETE_ENABLED_FIELD
             .withValidation(JdbcSinkConnectorConfig::validateDeleteEnabled);
-
-    public static final Field PRIMARY_KEY_FIELDS_FIELD = Field.create(PRIMARY_KEY_FIELDS)
-            .withDisplayName("Comma-separated list of primary key field names")
-            .withType(Type.STRING)
-            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR, 5))
-            .withWidth(ConfigDef.Width.MEDIUM)
-            .withImportance(ConfigDef.Importance.LOW)
-            .withDescription("A comma-separated list of primary key field names. " +
-                    "This is interpreted differently depending on " + PRIMARY_KEY_MODE + ".");
 
     public static final Field SCHEMA_EVOLUTION_FIELD = Field.create(SCHEMA_EVOLUTION)
             .withDisplayName("Controls how schema evolution is handled by the sink connector")
@@ -256,6 +247,16 @@ public class JdbcSinkConnectorConfig implements SinkConnectorConfig {
             .withImportance(ConfigDef.Importance.MEDIUM)
             .withDefault("${table}")
             .withDescription("Alternative format that uses table name instead of topic name. Use ${schema} for schema name and ${table} for table name.");
+
+    public static final Field ENABLE_SHARED_CHANGE_EVENT_SINK_FIELD = Field.createInternal(ENABLE_SHARED_CHANGE_EVENT_SINK)
+            .withDisplayName("Specifies whether to enable the new shared change event sink (sces) logic.")
+            .withType(Type.BOOLEAN)
+            .withGroup(Field.createGroupEntry(Field.Group.ADVANCED, 0))
+            .withWidth(ConfigDef.Width.SHORT)
+            .withImportance(ConfigDef.Importance.MEDIUM)
+            .withDefault(false)
+            // .withDefault(true)
+            .withDescription("Enables usage of the new AbstractChangeEventSink logic.");
 
     protected static final ConfigDefinition CONFIG_DEFINITION = ConfigDefinition.editor()
             .connector(
@@ -399,8 +400,10 @@ public class JdbcSinkConnectorConfig implements SinkConnectorConfig {
     private final int batchSize;
     private final boolean useReductionBuffer;
     private final boolean connectionRestartOnErrors;
+    private final boolean isSharedChangeEventSinkEnabled;
 
     public JdbcSinkConnectorConfig(Map<String, String> props) {
+        super();
         config = Configuration.from(props);
         this.insertMode = InsertMode.parse(config.getString(INSERT_MODE));
         this.deleteEnabled = config.getBoolean(DELETE_ENABLED_FIELD);
@@ -418,6 +421,7 @@ public class JdbcSinkConnectorConfig implements SinkConnectorConfig {
         this.sqlServerIdentityInsert = config.getBoolean(SQLSERVER_IDENTITY_INSERT_FIELD);
         this.batchSize = config.getInteger(BATCH_SIZE_FIELD);
         this.useReductionBuffer = config.getBoolean(USE_REDUCTION_BUFFER_FIELD);
+        this.isSharedChangeEventSinkEnabled = config.getBoolean(ENABLE_SHARED_CHANGE_EVENT_SINK_FIELD);
         this.flushMaxRetries = config.getInteger(FLUSH_MAX_RETRIES_FIELD);
         this.flushRetryDelayMs = config.getLong(FLUSH_RETRY_DELAY_MS_FIELD);
         this.connectionRestartOnErrors = config.getBoolean(CONNECTION_RESTART_ON_ERRORS_FIELD);
@@ -582,16 +586,8 @@ public class JdbcSinkConnectorConfig implements SinkConnectorConfig {
         return Module.name();
     }
 
-    private CollectionNamingStrategy resolveCollectionNamingStrategy(Configuration config, Map<String, String> properties) {
-        final CollectionNamingStrategy namingStrategy = config.getInstance(COLLECTION_NAMING_STRATEGY_FIELD, CollectionNamingStrategy.class);
-        namingStrategy.configure(properties);
-        return new TemporaryBackwardCompatibleCollectionNamingStrategyProxy(namingStrategy, this);
-    }
-
-    private ColumnNamingStrategy resolveColumnNamingStrategy(Configuration config, Map<String, String> properties) {
-        final ColumnNamingStrategy namingStrategy = config.getInstance(COLUMN_NAMING_STRATEGY_FIELD, ColumnNamingStrategy.class);
-        namingStrategy.configure(properties);
-        return namingStrategy;
+    public boolean isSharedChangeEventSinkEnabled() {
+        return isSharedChangeEventSinkEnabled;
     }
 
     private static int validateInsertMode(Configuration config, Field field, ValidationOutput problems) {

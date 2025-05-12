@@ -78,10 +78,10 @@ public class SinkRecordBuilder {
         private SinkRecord baseRecord;
         private SerializerType cloudEventsSerializerType;
         private String cloudEventsSchemaName;
-        private Map<String, Object> keyValues = new HashMap<>();
-        private Map<String, Object> beforeValues = new HashMap<>();
-        private Map<String, Object> afterValues = new HashMap<>();
-        private Map<String, Object> sourceValues = new HashMap<>();
+        private final Map<String, Object> keyValues = new HashMap<>();
+        private final Map<String, Object> beforeValues = new HashMap<>();
+        private final Map<String, Object> afterValues = new HashMap<>();
+        private final Map<String, Object> sourceValues = new HashMap<>();
 
         private SinkRecordTypeBuilder(Type type) {
             this.type = type;
@@ -246,7 +246,7 @@ public class SinkRecordBuilder {
         }
 
         private KafkaDebeziumSinkRecord buildCloudEventRecord() {
-            final String schemaName = cloudEventsSchemaName != null ? cloudEventsSchemaName : "test.test.CloudEvents.Envelope";
+            final String schemaName = cloudEventsSchemaName != null ? cloudEventsSchemaName : "test.test." + CloudEventsMaker.CLOUDEVENTS_SCHEMA_SUFFIX;
             final SchemaBuilder schemaBuilder = SchemaBuilder.struct()
                     .name(schemaName)
                     .field(CloudEventsMaker.FieldName.ID, Schema.STRING_SCHEMA)
